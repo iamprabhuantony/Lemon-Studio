@@ -302,8 +302,6 @@ pub const REFRESH_MIDI: &str = "Refresh device list";
 pub const UPDATE_SCRIPTS: &str = "Update MIDI scripts";
 const NO_SCRIPTS: &str = "Lemon Studio has no MIDI scripts";
 /// MIDI: Performance mode MIDI channel stays greyed with its reason.
-pub const PERFORMANCE_CHANNEL: &str = "Performance mode MIDI channel";
-const NO_PERFORMANCE: &str = "Performance mode is not played from MIDI yet";
 
 /// `LIVE`, and the checks declared in `crate::prefs`.
 fn live(key: &str) -> bool {
@@ -330,6 +328,8 @@ pub const MODE_SHARED: &str = "Shared (other programs play too)";
 pub const MODE_EXCLUSIVE: &str = "Exclusive (Lemon Studio alone, smaller buffers)";
 #[cfg(target_os = "linux")]
 pub const MODE_EXCLUSIVE: &str = "Exclusive (ALSA directly, past the sound server)";
+/// Linux: as a client of the JACK server (`audio_cfg::AudioCfg::jack`).
+pub const MODE_JACK: &str = "JACK (the JACK server's rate and buffer length)";
 const MODE_ASIO: &str = "Mode: for Windows devices (an ASIO driver plays on its own terms)";
 /// With an ASIO driver: its own settings window, where its buffer length is set.
 pub const SHOW_ASIO_PANEL: &str = "Show ASIO panel";
@@ -568,7 +568,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     combo(p::choice(&p::CONTROLLER_TYPE), 250.0, p::CONTROLLER_TYPE.label),
                     pair(Midi(MRow::Link(CurveOf::Velocity)), ValueR(p::OMNI_CHANNEL.label, number_text(&p::OMNI_CHANNEL))),
                     pair(Midi(MRow::Link(CurveOf::Release)), ValueR(p::MARKER_CHANNEL.label, number_text(&p::MARKER_CHANNEL))),
-                    pair(Check(p::PICKUP.label, false), ValueR(PERFORMANCE_CHANNEL, "---".into())),
+                    pair(Check(p::PICKUP.label, false), ValueR(p::PERFORMANCE_CHANNEL.label, number_text(&p::PERFORMANCE_CHANNEL))),
                     pair(Check(p::AUTO_ACCEPT.label, true), ValueR(p::MUTING_CHANNEL.label, number_text(&p::MUTING_CHANNEL))),
                     pair(Check(p::FOOT_PEDAL.label, true), Check(p::TOGGLE_ON_RELEASE.label, false)),
                 ]),
@@ -613,7 +613,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     // Windows devices play shared or exclusive (greyed under an ASIO driver, `MODE_ASIO`); so do Linux
                     // ones, through the sound server or ALSA.
                     if cfg!(windows) || cfg!(target_os = "linux") {
-                        let mode = combo(if st.audio.exclusive { "Exclusive" } else { "Shared" }, 120.0, MODE);
+                        let mode = combo(if st.audio.jack() { "JACK" } else if st.audio.exclusive { "Exclusive" } else { "Shared" }, 120.0, MODE);
                         let device = st.audio.device.as_deref().unwrap_or("the default device");
                         let alone = exclusive.then(|| {
                             let line = if cfg!(windows) {
@@ -623,7 +623,11 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                             };
                             Text(line, true)
                         });
-                        std::iter::once(mode).chain(alone).collect()
+                        // JACK: its server sets the rate and buffer length; the ports connect to the system's own.
+                        let jack = st.audio.jack().then(|| {
+                            Text("Lemon Studio plays as a JACK client at the server's rate and buffer length (set them in the server, e.g. qjackctl); its ports connect to the system playback and capture ports. With no JACK server running it plays as in shared mode.".into(), true)
+                        });
+                        std::iter::once(mode).chain(alone).chain(jack).collect()
                     } else {
                         Vec::new()
                     },
@@ -1504,11 +1508,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
         }
         Row::ValueR(label, v) => {
             let b = Rect::new(g.right() - 52.0, y + 3.0, 42.0, 21.0);
-            if *label == PERFORMANCE_CHANNEL {
-                ui.hit(b, Action::Settings(SAct::Body), NO_PERFORMANCE);
-            } else {
-                ui.off(b, name_of(label, group));
-            }
+            ui.off(b, name_of(label, group));
             value_red(ui, b, v);
             ui.c.text_right(f, b.x - 8.0, ty, t.text, label);
             let lw = ui.c.text_width(f, label);

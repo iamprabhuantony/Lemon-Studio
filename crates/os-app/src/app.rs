@@ -2081,6 +2081,11 @@ impl App {
                     self.state.message = crate::presets::save_chosen(self, key, p);
                 }
             }
+            Then::SaveChannelState(row) => {
+                if let Some(p) = file {
+                    self.state.message = crate::channel_states::save_chosen(self, row, p);
+                }
+            }
             Then::ImportPreset(key) => {
                 if let Some(p) = file {
                     self.state.message = crate::presets::import_chosen(self, key, p);
@@ -2132,6 +2137,17 @@ impl App {
             Then::SongSignature(at, num, den) => {
                 if reply == Reply::Button(Answer::Ok) {
                     crate::timesig::set_song(&mut self.state, at, num, den);
+                }
+            }
+            Then::PerfConfirm => {
+                if reply == Reply::Button(Answer::Ok) {
+                    self.open_marker_settings();
+                }
+            }
+            Then::PerfMarkers(count, spacing) => {
+                if reply == Reply::Button(Answer::Ok) {
+                    let m = crate::perform::prepare_with(&mut self.state, crate::perform::MarkerForm { count, spacing });
+                    self.state.message = Some(m);
                 }
             }
             Then::DataFolder(d) => self.data_folder_done(d, reply),
@@ -2552,8 +2568,11 @@ impl App {
         // windows' requests come with it.
         #[cfg(plugin_windows)]
         let requests = {
-            let (project, mixer) = (&self.state.project, &self.state.mixer);
-            self.plugins.idle(|row| if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) })
+            let (project, mixer, icons) = (&self.state.project, &self.state.mixer, &self.state.playlist.icons);
+            self.plugins.idle(|row| {
+                let info = if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) };
+                info.map(|i| crate::plugin_window::ChannelInfo { icon: crate::playlist::window_icon(project, icons, row), ..i })
+            })
         };
         // No plugin windows here, so no requests.
         #[cfg(not(plugin_windows))]
@@ -3977,6 +3996,8 @@ impl App {
         self.work_tick(now);
         self.song_info_tick(now);
         self.auto_close_tick(now);
+        // Audio ▸ CPU ▸ Auto-bypass when silent, for every slot whose own switch is on (spec: audio/auto-bypass.md).
+        os_engine::engine::auto_bypass::set_enabled(crate::prefs::check(&crate::prefs::SMART_DISABLE));
         self.follow_settings();
         if self.state.cpu.due(now) {
             let tp = &self.transport;
@@ -4267,6 +4288,11 @@ impl App {
         // A MIDI file is imported as FILE ▸ Import ▸ MIDI file does (spec: ui/midi-files.md §10.6).
         if ext == "mid" || ext == "midi" {
             return self.midi_file_chosen(path, false);
+        }
+        // A channel state adds its channel (spec: ui/plugin-window.md "Channel states").
+        if crate::channel_states::is_state_file(&path) {
+            self.state.message = crate::channel_states::add(self, &path);
+            return self.invalidate();
         }
         // A preset goes into the plugin under the mouse, or a new instance of its plugin (spec: plugins/presets.md).
         if crate::presets::is_preset_file(&path) {
@@ -4762,10 +4788,14 @@ impl App {
                 .collect(),
             // Windows devices: shared or exclusive mode (spec: audio/wasapi-low-latency.md 4.2). Linux: the sound server,
             // or an ALSA device directly.
-            MODE => vec![
-                PItem::new(MODE_SHARED, Cmd::Audio(Set::Mode(false))).mark(Mark::Radio(!cfg.exclusive)),
-                PItem::new(MODE_EXCLUSIVE, Cmd::Audio(Set::Mode(true))).mark(Mark::Radio(cfg.exclusive)),
-            ],
+            MODE => [
+                PItem::new(MODE_SHARED, Cmd::Audio(Set::Mode(false))).mark(Mark::Radio(!cfg.exclusive && !cfg.jack)),
+                PItem::new(MODE_EXCLUSIVE, Cmd::Audio(Set::Mode(true))).mark(Mark::Radio(cfg.exclusive && !cfg.jack)),
+            ]
+            .into_iter()
+            // Linux: as a client of the JACK server (spec: audio/linux-output.md "JACK").
+            .chain(cfg!(target_os = "linux").then(|| PItem::new(views::settings::MODE_JACK, Cmd::Audio(Set::Jack)).mark(Mark::Radio(cfg.jack))))
+            .collect(),
             // Under an ASIO driver: the driver's own, then what it takes, once it has opened (spec: audio/devices.md,
             // "Sample rate and buffer length under ASIO"). In exclusive mode: the rates the device runs at itself
             // (audio/wasapi-low-latency.md 4.4).
@@ -8758,6 +8788,7 @@ impl App {
             // spec: ui/unused-channels.md
             MenuCmd::SelectUnused => self.state.message = crate::rack::run(self, crate::rack::RCmd::SelectUnused),
             MenuCmd::PurgeClips => self.state.message = crate::rack::run(self, crate::rack::RCmd::Purge),
+            MenuCmd::AutoBypassAll => self.state.message = crate::mixer::run(self, crate::mixer::MCmd::AutoBypassAll),
             MenuCmd::RemoveTeslas => {
                 if let Some(m) = self.ask_remove_teslas() {
                     self.state.message = Some(m);
@@ -8765,6 +8796,20 @@ impl App {
             }
             MenuCmd::PrepPerformance => {
                 if let Some(m) = crate::playlist::run(self, crate::playlist::Cmd::PerfPrepare) {
+                    self.state.message = Some(m);
+                }
+            }
+            // spec: ui/piano-tools.md §4 "Lemon Studio"
+            MenuCmd::Chords => {
+                let at = self.mouse;
+                crate::playlist::start_edit(&mut self.state, crate::playlist::EditTarget::Chords, at);
+                if let Some(e) = self.state.playlist.edit.as_mut() {
+                    e.sel = true;
+                }
+            }
+            // spec: ui/playlist.md "Locking tracks to their clips"
+            MenuCmd::LockClips(on) => {
+                if let Some(m) = crate::playlist::run(self, crate::playlist::Cmd::LockClips(on)) {
                     self.state.message = Some(m);
                 }
             }
@@ -9138,6 +9183,7 @@ fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::Channel
         track: ch.mixer_track,
         max_track: crate::mixer::max_insert(p),
         misc: Some(crate::misc::vals_of(ch)),
+        icon: None,
     })
 }
 
@@ -12241,7 +12287,7 @@ mod tests {
         click(&mut app, &mut c, r);
         assert_eq!(app.state.message.as_deref(), Some("Soft takeover: on"));
         assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Lemon Studio has no MIDI scripts"));
-        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Performance mode is not played from MIDI yet"));
+        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Number("Performance mode MIDI channel"))));
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(PROJECT)));
         click(&mut app, &mut c, r);
         assert!(app.hits.iter().any(|h| matches!(h.action, Action::Settings(SAct::Combo("Ask for data folder", ..)))), "Ask for data folder works");
@@ -12338,6 +12384,7 @@ mod tests {
             crate::dialog::Body::Msg(m) => panic!("a message box is on top: {}", m.plain()),
             crate::dialog::Body::Shortcuts(_) => panic!("Manage shortcuts is on top"),
             crate::dialog::Body::TimeSig(_) => panic!("the time signature dialog is on top"),
+            crate::dialog::Body::Markers(_) => panic!("Marker settings is on top"),
             crate::dialog::Body::Project(_) => panic!("a project form is on top"),
         }
     }
@@ -13387,7 +13434,7 @@ mod tests {
         eprintln!("driver | block | rate | tick | ahead min / mean / max (frames) | mean ms | driver latency | longest gap ms | load | dropouts");
         for &b in &buffers {
             for _ in 0..runs {
-                AudioCfg { asio: true, device: Some(driver.clone()), rate: None, buffer: Some(b), exclusive: false, input: None }.apply();
+                AudioCfg { asio: true, device: Some(driver.clone()), rate: None, buffer: Some(b), exclusive: false, input: None, jack: false }.apply();
                 app.transport.reopen();
                 let t0 = Instant::now();
                 let info = loop {
@@ -13524,9 +13571,9 @@ mod tests {
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
-        // The all tab lists the roots with content and the preset store, all closed.
+        // The all tab lists the roots with content, the preset store and the channel states, all closed.
         let labels: Vec<String> = rows(&app.state).into_iter().map(|r| r.label).collect();
-        assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets"]);
+        assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets", "Channel presets"]);
         // Project tab: Current project opened with its patterns (default like the screenshot), History above them.
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
         click(&mut app, &mut c, r0);
@@ -14559,7 +14606,7 @@ mod tests {
         // Esc clears the search and leaves the box.
         app.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(app.state.browser_search.is_empty() && !app.state.browser_search_focus);
-        assert_eq!(rows(&app.state).len(), 3);
+        assert_eq!(rows(&app.state).len(), 4);
         // Search box on top moves the list down.
         app.browser_cmd(crate::browser::BCmd::Toggle("top"));
         frame(&mut app, &mut c, None);

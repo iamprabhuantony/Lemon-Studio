@@ -18,6 +18,7 @@ use os_ui::{tabler, Canvas, Color, Font, Rect};
 use crate::doc::Doc;
 use crate::peaks::Peaks;
 use crate::state::{self, Rec};
+use crate::env::EnvDlg;
 use crate::spectral::{self, Blur, Clean, Curve, Equalize};
 use crate::tools::{Amp, DrumStretch, Law, Reverb, Stretch};
 
@@ -183,6 +184,18 @@ pub enum AmpCtl {
     NoiseOnly,
     Declip,
     ClipLevel,
+    /// Clean up's second row: the declipper's mode and Safe mode, the declicker and its sensitivity.
+    Mode,
+    Safe,
+    Declick,
+    Sensitivity,
+    /// An envelope tool's two knobs.
+    EnvA,
+    EnvB,
+    /// Vocal denoise / isolator's MIX knob; Deverb's MIX knob and SOURCE button.
+    VoiceMix,
+    DeverbMix,
+    Source,
     Acquire,
     Reset,
     Preview,
@@ -311,24 +324,29 @@ pub struct ViewState {
 
 /// The open tool panel: Amp, Time stretch / pitch shift when `stretch` is set, Drum(loop) stretch when `drum` is,
 /// Convolution reverb when `reverb` is,
-/// Equalize, Blur or Clean up (denoise) when `eq`, `blur` or `clean` is (`curve`: Equalize's and Blur's curve).
+/// Equalize, Blur or Clean up (denoise) when `eq`, `blur` or `clean` is (`curve`: Equalize's and Blur's curve),
+/// Vocal denoise / isolator or Deverb when `voice` or `deverb` is.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AmpUi {
     pub amp: Amp,
     pub stretch: Option<Stretch>,
     pub drum: Option<DrumStretch>,
+    pub env: Option<EnvDlg>,
     pub reverb: Option<Reverb>,
     pub eq: Option<Equalize>,
     pub blur: Option<Blur>,
     pub clean: Option<Clean>,
+    pub voice: Option<crate::restore::Isolate>,
+    pub deverb: Option<crate::restore::Deverb>,
     pub curve: Curve,
     pub previewing: bool,
 }
 
 impl AmpUi {
-    /// Whether Preview and Accept would do anything (Clean up needs a noise profile, or the declipper on).
+    /// Whether Preview and Accept would do anything (Clean up needs a noise profile, or the declipper or the
+    /// declicker on).
     pub fn ready(&self, profile: bool) -> bool {
-        self.clean.is_none_or(|c| profile || c.declip)
+        self.clean.is_none_or(|c| profile || c.declip || c.declick)
     }
 }
 
@@ -750,16 +768,28 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
     }
     let fmt = doc.view.time;
     let step = grid_step(fmt, l.shown.rate, doc.sample.tempo, per_px, 90.0);
-    let mut g = (start / step).floor() * step;
+    // Bars run through the first downbeat and count from it.
+    let db = if fmt == state::TIME_BBT { doc.sample.downbeat as f64 } else { 0.0 };
+    let mut g = ((start - db) / step).floor() * step + db;
     let end = start + per_px * lane.w as f64;
     while g <= end {
         let x = fx(g).round();
         if x >= lane.x {
             ui.c.fill_rect(Rect::new(x, lane.y, 1.0, lane.h), plug::GRID);
-            let t = time_text(fmt, g, l.shown.rate, doc.sample.tempo, per_px);
-            ui.c.text(SMALL, x + 3.0, lane.bottom() - 13.0, plug::OFF, &t);
+            if g >= db - 0.5 {
+                let t = time_text(fmt, (g - db).max(0.0), l.shown.rate, doc.sample.tempo, per_px);
+                ui.c.text(SMALL, x + 3.0, lane.bottom() - 13.0, plug::OFF, &t);
+            }
         }
         g += step;
+    }
+    // The first downbeat, when it is set.
+    if doc.sample.downbeat > 0 {
+        let x = fx(doc.sample.downbeat as f64).round();
+        if x >= lane.x && x <= lane.right() {
+            ui.c.fill_rect(Rect::new(x, lane.y, 1.0, lane.h), LOOP.with_alpha(150));
+            ui.c.text(SMALL, x + 3.0, lane.bottom() - 26.0, LOOP, "Downbeat");
+        }
     }
     // The waveform (the spectrogram is drawn under the selection and the grid).
     if l.spectrum.is_none() {
@@ -850,12 +880,26 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
         let n = doc.frames();
         if n > 0 {
             let p = doc.env.points(k, n);
-            let pts: Vec<(f32, f32)> = p.iter().map(|q| (fx(q.pos), env_y(lane, q.v))).collect();
+            // A smooth point's line is drawn in 16 pieces.
+            let mut pts: Vec<(f32, f32)> = Vec::with_capacity(p.len() * 2);
+            for (i, q) in p.iter().enumerate() {
+                pts.push((fx(q.pos), env_y(lane, q.v)));
+                if let (true, Some(b)) = (q.smooth, p.get(i + 1)) {
+                    for s in 1..16 {
+                        let pos = q.pos + (b.pos - q.pos) * s as f64 / 16.0;
+                        pts.push((fx(pos), env_y(lane, crate::env::value(&p, pos))));
+                    }
+                }
+            }
             ui.c.polyline(&pts, 1.6, FLAG);
-            for &(x, y) in &pts {
+            for q in &p {
+                let (x, y) = (fx(q.pos), env_y(lane, q.v));
                 if x >= lane.x - POINT_R && x <= lane.right() + POINT_R {
                     ui.c.fill_circle(x, y, POINT_R, plug::BG);
                     ui.c.stroke_circle(x, y, POINT_R, 1.4, FLAG);
+                    if q.smooth {
+                        ui.c.fill_circle(x, y, POINT_R - 1.8, FLAG);
+                    }
                 }
             }
         }
@@ -1088,6 +1132,37 @@ fn drum_panel(ui: &mut Ui, a: &AmpUi, ds: &DrumStretch, lay: &Layout) {
     panel_buttons(ui, a, p);
 }
 
+/// An envelope tool's panel geometry: one or two knobs.
+pub fn env_parts(lay: &Layout, e: &EnvDlg) -> (Rect, Vec<(AmpCtl, Rect)>) {
+    let (w, h) = (208.0, 190.0f32.min(lay.h - 8.0));
+    let p = Rect::new((lay.wave.cx() - w / 2.0).round(), ((lay.h - h) / 2.0).round(), w, h);
+    let knob = |cx: f32| Rect::new(p.x + cx - 22.0, p.y + 50.0, 44.0, 44.0);
+    let parts = if e.tool.captions().1.is_some() { vec![(AmpCtl::EnvA, knob(58.0)), (AmpCtl::EnvB, knob(150.0))] } else { vec![(AmpCtl::EnvA, knob(104.0))] };
+    (p, parts)
+}
+
+fn env_panel(ui: &mut Ui, a: &AmpUi, e: &EnvDlg, lay: &Layout) {
+    let (p, parts) = env_parts(lay, e);
+    ui.hit(p, Target::AmpPanel);
+    lemon::outlined(ui.c, p.outset(1.0), 11.0, Color::rgb(0x111111), plug::PANEL_LINE);
+    lemon::plug_panel(ui.c, p);
+    ui.c.text(TITLE, p.x + 12.0, p.y + 7.0, brand::TEXT, e.tool.name());
+    lemon::plug_well(ui.c, Rect::new(p.x + 8.0, p.y + 30.0, p.w - 16.0, p.h - 74.0), 7.0);
+    let (ca, cb) = e.tool.captions();
+    let (ta, tb) = e.texts();
+    for (ctl, r) in parts {
+        let t = Target::Amp(ctl);
+        ui.hit(r, t);
+        let s = ui.state(r, t, false);
+        let (v, cap, val) = if ctl == AmpCtl::EnvA { (e.a, ca, &ta) } else { (e.b, cb.unwrap_or(""), &tb) };
+        let centred = e.tool == crate::env::EnvTool::Scale;
+        lemon::dial(ui.c, r.cx(), r.cy(), r.w / 2.0, 4.0, (v + 1.0) / 2.0, centred, brand::MAIN, s);
+        ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.y - 15.0, r.w + 40.0, 12.0), plug::DIM, cap);
+        ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.bottom() + 4.0, r.w + 40.0, 12.0), brand::TEXT, val);
+    }
+    panel_buttons(ui, a, p);
+}
+
 /// The Convolution reverb panel's geometry: Dry, Wet and Decay knobs, then the Add tail and Clipboard switches.
 pub fn reverb_parts(lay: &Layout) -> (Rect, [(AmpCtl, Rect); 5]) {
     let (w, h) = (208.0, 290.0f32.min(lay.h - 8.0));
@@ -1131,12 +1206,65 @@ fn reverb_panel(ui: &mut Ui, a: &AmpUi, r: &Reverb, lay: &Layout) {
     panel_buttons(ui, a, p);
 }
 
+/// Vocal denoise / isolator's and Deverb's panel geometry: the MIX knob, and Deverb's SOURCE button.
+pub fn restore_parts(lay: &Layout, a: &AmpUi) -> (Rect, Vec<(AmpCtl, Rect)>) {
+    let (w, h) = (240.0, 190.0f32.min(lay.h - 8.0));
+    let p = Rect::new((lay.wave.cx() - w / 2.0).round(), ((lay.h - h) / 2.0).round(), w, h);
+    let knob = |cx: f32| Rect::new(p.x + cx - 22.0, p.y + 50.0, 44.0, 44.0);
+    let parts = if a.deverb.is_some() {
+        vec![(AmpCtl::DeverbMix, knob(66.0)), (AmpCtl::Source, Rect::new(p.x + 122.0, p.y + 61.0, 102.0, 22.0))]
+    } else {
+        vec![(AmpCtl::VoiceMix, knob(120.0))]
+    };
+    (p, parts)
+}
+
+fn restore_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
+    let (p, parts) = restore_parts(lay, a);
+    ui.hit(p, Target::AmpPanel);
+    lemon::outlined(ui.c, p.outset(1.0), 11.0, Color::rgb(0x111111), plug::PANEL_LINE);
+    lemon::plug_panel(ui.c, p);
+    let title = if a.deverb.is_some() { "Deverb" } else { "Vocal denoise / isolator" };
+    ui.c.text(TITLE, p.x + 12.0, p.y + 7.0, brand::TEXT, title);
+    lemon::plug_well(ui.c, Rect::new(p.x + 8.0, p.y + 30.0, p.w - 16.0, p.h - 74.0), 7.0);
+    let dv = a.deverb.unwrap_or_default();
+    for (ctl, r) in parts {
+        let t = Target::Amp(ctl);
+        ui.hit(r, t);
+        let s = ui.state(r, t, false);
+        if ctl == AmpCtl::Source {
+            let col = ui.button(r, t, false, true);
+            ui.c.text_center(CAPTION, r, col, &format!("SOURCE: {}", dv.source().to_uppercase()));
+            continue;
+        }
+        let (v, centred, val) = match a.voice {
+            Some(iso) => {
+                let pc = (iso.mix * 100.0).round() as i32;
+                let val = match pc {
+                    0 => "original".to_string(),
+                    p if p > 0 => format!("{p}% vocal"),
+                    p => format!("{}% noise", -p),
+                };
+                (iso.mix, true, val)
+            }
+            None => (dv.mix * 2.0 - 1.0, false, format!("{:.0}%", dv.mix * 100.0)),
+        };
+        lemon::dial(ui.c, r.cx(), r.cy(), r.w / 2.0, 4.0, (v + 1.0) / 2.0, centred, brand::MAIN, s);
+        ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.y - 15.0, r.w + 40.0, 12.0), plug::DIM, "MIX");
+        ui.c.text_center(CAPTION, Rect::new(r.x - 30.0, r.bottom() + 4.0, r.w + 60.0, 12.0), brand::TEXT, &val);
+    }
+    panel_buttons(ui, a, p);
+}
+
 /// The spectral panels' geometry (Equalize, Blur, Clean up): the panel, its curve box, and the controls under the box.
 pub fn spectral_parts(lay: &Layout, a: &AmpUi) -> (Rect, Rect, Vec<(AmpCtl, Rect)>) {
-    let (w, h) = (432.0, 330.0f32.min(lay.h - 8.0));
+    // Clean up has a second row of controls.
+    let extra = if a.clean.is_some() { 74.0 } else { 0.0 };
+    let (w, h) = (432.0, (330.0f32 + extra).min(lay.h - 8.0));
     let p = Rect::new((lay.wave.cx() - w / 2.0).round(), ((lay.h - h) / 2.0).round(), w, h);
-    let bx = Rect::new(p.x + 18.0, p.y + 40.0, p.w - 36.0, (p.h - 174.0).max(60.0));
+    let bx = Rect::new(p.x + 18.0, p.y + 40.0, p.w - 36.0, (p.h - 174.0 - extra).max(60.0));
     let cy = bx.bottom() + 51.0;
+    let cy2 = cy + 74.0;
     let knob = |cx: f32| Rect::new(p.x + cx - 18.0, cy - 18.0, 36.0, 36.0);
     let switch = |x: f32, dy: f32| Rect::new(p.x + x, cy + dy - 9.0, 96.0, 18.0);
     let mut c = vec![(AmpCtl::Curve, bx)];
@@ -1152,6 +1280,10 @@ pub fn spectral_parts(lay: &Layout, a: &AmpUi) -> (Rect, Rect, Vec<(AmpCtl, Rect
             (AmpCtl::Declip, switch(172.0, 11.0)),
             (AmpCtl::ClipLevel, knob(300.0)),
             (AmpCtl::Acquire, Rect::new(p.right() - 94.0, cy - 12.0, 76.0, 24.0)),
+            (AmpCtl::Sensitivity, Rect::new(p.x + 42.0, cy2 - 18.0, 36.0, 36.0)),
+            (AmpCtl::Declick, Rect::new(p.x + 90.0, cy2 - 9.0, 78.0, 18.0)),
+            (AmpCtl::Mode, Rect::new(p.x + 172.0, cy2 - 11.0, 100.0, 22.0)),
+            (AmpCtl::Safe, Rect::new(p.x + 282.0, cy2 - 9.0, 96.0, 18.0)),
         ]);
     }
     (p, bx, c)
@@ -1167,6 +1299,7 @@ fn spectral_knob(a: &AmpUi, ctl: AmpCtl) -> (f32, bool, &'static str, String) {
         AmpCtl::Offset => ((bl.offset + 1.0) / 2.0, true, "OFFSET", format!("{:+.0}%", bl.offset * 100.0)),
         AmpCtl::Threshold => (cl.denoise.threshold, false, "THRESHOLD", format!("+{:.1} dB", cl.denoise.threshold_db())),
         AmpCtl::Reduction => (cl.denoise.amount, false, "AMOUNT", format!("-{:.0} dB", cl.denoise.reduction_db())),
+        AmpCtl::Sensitivity => (cl.sensitivity, false, "SENSITIVITY", format!("{:.0}%", cl.sensitivity * 100.0)),
         _ => (cl.level, false, "CLIP LEVEL", format!("{:.0}%", cl.clip_ratio() * 100.0)),
     }
 }
@@ -1238,12 +1371,14 @@ fn spectral_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
     for (ctl, r) in parts.into_iter().skip(1) {
         let t = Target::Amp(ctl);
         match ctl {
-            AmpCtl::Smooth | AmpCtl::NoiseOnly | AmpCtl::Declip => {
+            AmpCtl::Smooth | AmpCtl::NoiseOnly | AmpCtl::Declip | AmpCtl::Declick | AmpCtl::Safe => {
                 ui.hit(r, t);
                 let s = ui.state(r, t, false);
                 let (on, cap) = match ctl {
                     AmpCtl::Smooth => (a.eq.is_some_and(|e| e.smooth), "SMOOTH"),
                     AmpCtl::NoiseOnly => (a.clean.is_some_and(|c| c.denoise.noise_only), "NOISE ONLY"),
+                    AmpCtl::Declick => (a.clean.is_some_and(|c| c.declick), "DECLICKER"),
+                    AmpCtl::Safe => (a.clean.is_some_and(|c| c.safe), "SAFE MODE"),
                     _ => (a.clean.is_some_and(|c| c.declip), "DECLIPPER"),
                 };
                 lemon::toggle(ui.c, r.x + 7.0, r.cy(), on, s);
@@ -1252,6 +1387,11 @@ fn spectral_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
             AmpCtl::Acquire => {
                 let col = ui.button(r, t, false, true);
                 ui.c.text_center(LABEL, r, col, "ACQUIRE");
+            }
+            AmpCtl::Mode => {
+                let cl = a.clean.unwrap_or_default();
+                let col = ui.button(r, t, false, cl.declip);
+                ui.c.text_center(CAPTION, r, col, &format!("MODE: {}", cl.mode.name().to_uppercase()));
             }
             _ => {
                 ui.hit(r, t);
@@ -1289,8 +1429,14 @@ fn amp_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
     if let Some(ds) = &a.drum {
         return drum_panel(ui, a, ds, lay);
     }
+    if let Some(e) = &a.env {
+        return env_panel(ui, a, e, lay);
+    }
     if let Some(r) = &a.reverb {
         return reverb_panel(ui, a, r, lay);
+    }
+    if a.voice.is_some() || a.deverb.is_some() {
+        return restore_panel(ui, a, lay);
     }
     if a.eq.is_some() || a.blur.is_some() || a.clean.is_some() {
         return spectral_panel(ui, a, lay);
@@ -1579,6 +1725,13 @@ pub fn hint(t: &Target, l: &HintCtx) -> String {
         Target::Amp(AmpCtl::NoiseOnly) => "Output noise only (what the denoiser takes away)".into(),
         Target::Amp(AmpCtl::Declip) => "Declipper (redraws flattened tops)".into(),
         Target::Amp(AmpCtl::ClipLevel) => "Declipper threshold (of the range's peak)".into(),
+        Target::Amp(AmpCtl::Mode) => "Declipper mode (click for the next)".into(),
+        Target::Amp(AmpCtl::Safe) => "Safe mode (long runs left alone, tops kept near the clip level)".into(),
+        Target::Amp(AmpCtl::Declick) => "Declicker (redraws clicks and pops)".into(),
+        Target::Amp(AmpCtl::Sensitivity) => "Declicker sensitivity".into(),
+        Target::Amp(AmpCtl::EnvA) | Target::Amp(AmpCtl::EnvB) => "Drag to change, double-click to reset".into(),
+        Target::Amp(AmpCtl::VoiceMix) | Target::Amp(AmpCtl::DeverbMix) => "Mix: drag to change, double-click to reset".into(),
+        Target::Amp(AmpCtl::Source) => "Source: General (music, drums) or Vocal (a voice, spoken or sung)".into(),
         Target::Amp(AmpCtl::Acquire) => "Acquire noise profile from the selection (Alt+U)".into(),
         Target::Amp(AmpCtl::Reset) => "Reset".into(),
         Target::Amp(AmpCtl::Preview) => "Preview".into(),

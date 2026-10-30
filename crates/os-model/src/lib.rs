@@ -123,6 +123,10 @@ pub struct Project {
     /// Internal controller links, in file order (event 227 with 0x8000 and up in its first field; spec:
     /// flp/events/automation.md "Controller links"): a controller plugin's output driving a target.
     pub controller_links: Vec<ControllerLink>,
+    /// Mixer options ▸ Plugin delay compensation ▸ Automatic unticked: the plugins' delays are not compensated, only
+    /// the tracks' latency settings are (spec: audio/delay-compensation.md "Automatic"). Not saved: where the original
+    /// keeps it was not found.
+    pub pdc_off: bool,
 }
 
 /// One internal controller link (spec: flp/events/automation.md "Controller links"): output `output` of the controller
@@ -234,6 +238,11 @@ impl InitControl {
     pub fn from_unit(t: u32, v: f64) -> Option<InitControl> {
         use target::Target;
         let v = v.clamp(0.0, 1.0);
+        // The main swing's start value, in event 11's unit (the rack's swing knob: 0..128). Lemon Studio's design: what
+        // the original writes for it was not measured, and no automation clip drives it yet (`unit` gives `None`).
+        if t == Self::MAIN_SWING {
+            return Some(InitControl { head: 0, target: t, value: (128.0 * v).round() as i32 });
+        }
         let value = match target::decode(t) {
             Target::ChannelVolume(_) | Target::ChannelPan(_) | Target::SlotMix(..) => 12800.0 * v,
             Target::ChannelPitch(_) => 9600.0 * v - 4800.0,
@@ -1018,6 +1027,24 @@ pub struct ChannelMisc {
     /// The pitch knob's range, semitones either way (1..=48; the plugin window's RANGE box). Not saved: where the file
     /// keeps it is not mapped yet (flp/events/channels.md).
     pub pitch_range: u8,
+    /// The channel plugin's CPU switches (its window menu's CPU entries).
+    pub cpu: PluginCpu,
+}
+
+/// A hosted plugin's CPU switches, its window menu's Allow threaded processing (on for a new plugin) and Smart disable
+/// (off), as event 212 stores them (flags 0x40 and 0x20; spec: flp/events/plugins.md §3, ui/plugin-window.md "CPU").
+/// Saved with the plugin. The engine passes a silent mixer slot by when its Smart disable is on (spec:
+/// audio/auto-bypass.md); what is heard is the same either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PluginCpu {
+    pub threaded: bool,
+    pub smart_disable: bool,
+}
+
+impl Default for PluginCpu {
+    fn default() -> Self {
+        PluginCpu { threaded: true, smart_disable: false }
+    }
 }
 
 /// A layer channel's settings besides its children (spec: audio/note-rules.md "Settings", "Layer channels").
@@ -1064,6 +1091,7 @@ impl Default for ChannelMisc {
             key_range: [0, 256],
             layer: LayerSettings::default(),
             pitch_range: 2,
+            cpu: PluginCpu::default(),
         }
     }
 }
@@ -1460,6 +1488,8 @@ pub struct MixerTrack {
     /// input is heard (event 166: `MONITOR_OFF`, `MONITOR_ARMED`, `MONITOR_ON`).
     pub rec_source: u8,
     pub monitor: u8,
+    /// Per slot: the slot plugin's CPU switches (event 212 flags; they follow the plugin when it moves).
+    pub slot_cpu: [PluginCpu; 10],
     /// Armed for disk recording (the strip's record button). Not saved, and not part of the track: tracks that differ
     /// only here are equal (spec: audio/track-io.md §1.5).
     pub armed: bool,
@@ -1501,6 +1531,7 @@ impl PartialEq for MixerTrack {
             audio_out,
             rec_source,
             monitor,
+            slot_cpu,
             armed: _,
             origin: _,
         } = self;
@@ -1530,6 +1561,7 @@ impl PartialEq for MixerTrack {
             && *audio_out == o.audio_out
             && *rec_source == o.rec_source
             && *monitor == o.monitor
+            && *slot_cpu == o.slot_cpu
     }
 }
 
@@ -1579,6 +1611,7 @@ impl MixerTrack {
             audio_out: if index == 0 { 0 } else { -1 },
             rec_source: REC_POST_EQ,
             monitor: MONITOR_ARMED,
+            slot_cpu: [PluginCpu::default(); 10],
             armed: false,
             origin: None,
         }
@@ -1965,12 +1998,16 @@ pub struct PlaylistTrack {
     pub locked: bool,
     /// Performance settings (bytes 22..46; spec: ui/performance-mode.md §4).
     pub perf: PerfSettings,
+    /// The source this track is locked to: Draw and Paint place it here whatever the picker's current source is
+    /// (TOOLS ▸ Lock all tracks to their clips). Lemon Studio's design, for the session only: no file stores it
+    /// (spec: ui/playlist.md "Locking tracks to their clips").
+    pub clip_lock: Option<ClipSource>,
 }
 
 impl PlaylistTrack {
     /// Track `number` as a new project has it: unnamed, default colour, on, not grouped.
     pub fn new(number: u32) -> Self {
-        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false, perf: PerfSettings::default() }
+        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false, perf: PerfSettings::default(), clip_lock: None }
     }
 }
 
@@ -2426,6 +2463,8 @@ pub mod target {
                 let v = c.unit().unwrap();
                 assert_eq!(InitControl::from_unit(t, v), Some(c), "{t:#010x}");
             }
+            // The main swing's start value: 0..128, as event 11 keeps it.
+            assert_eq!(InitControl::from_unit(InitControl::MAIN_SWING, 0.5), Some(InitControl { head: 0, target: InitControl::MAIN_SWING, value: 64 }));
             // Units not known: kept, not converted.
             for t in [channel_param(0, 4), slot_param(1, 0, 2), InitControl::MAIN_VOLUME, channel(0, CHANNEL_CUTOFF)] {
                 assert_eq!(InitControl::from_unit(t, 0.5), None);

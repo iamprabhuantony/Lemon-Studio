@@ -23,6 +23,16 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   controls
 - A channel's Receive notes from ▸ locks it to the computer keyboard or the Touch controller: their notes play it
   whichever channel is selected (a padlock on its name button; Unlock ends the lock)
+- A channel's menu: Change icon... puts an icon on its name button (the same icon as its plugin window and clips, for
+  the session); Show waveform preview draws a sampler or audio clip channel's sample across its name button; MIDI
+  channel through (ticked by default) gives a hosted VST, VST 3 or CLAP instrument a MIDI device's notes on the MIDI
+  channel they came on, and a recorded note takes that channel as its colour. The two checks last for the session
+- The rack's Restretch all (Ctrl+Alt+R) fits every stretched sample and audio clip to the project tempo at once
+  (they follow the tempo by themselves too, also with tempo automation)
+- The rack's knob, mixer box and LED menus: Edit automation in piano roll opens the piano roll on the channel volume
+  or panning lane, the swing knob takes a song start value, and the mixer box and the LED link to a MIDI controller
+- The mixer options' Link all parameters... links the current track's volume, pan, separation, equaliser, sends and
+  slot mix levels to consecutive MIDI controllers in one go
 - Advanced looping (the loop button's third loop type): each row's loop box takes a loop point, Step, Beat or Bar,
   and the row loops at the end of its last used step rounded up to it
 - Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)
@@ -53,7 +63,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Playlist with pattern, audio and automation clips
 - Clip groups, markers and several arrangements
 - Time markers with FL's actions (right-click a marker): Start, Loop, Marker loop, Marker skip and Marker pause
-  play in SONG mode; exports start at the Start marker and jump at skips. Move content left / right, Place loop
+  play in SONG mode; exports start at the Start marker and jump at skips, and the clock's bars count from the Start
+  marker. Move content left / right, Place loop
   (Shift+T), Add auto, Add one every, Add jump to next bar, time signature markers, and Delete or Change to marker
   loop in the time selection, Add two... (markers at the time selection's ends) and Add key marker (root and
   scale, saved as FL saves them). A click on a marker moves the song position there. A Stop recording marker ends
@@ -72,10 +83,20 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Auto scrolling (toolbar, OPTIONS menu): while playing, the playlist follows the playhead (the piano roll in
   pattern mode), continuously or a quarter page at a time (right-click on the button)
 - Performance mode (Ctrl+P, the arranger's ▸ menu; Prepare for performance mode or TOOLS ▸ Set up for live
-  performance lays out 16 columns and a Start marker): a click on a clip before the Start marker launches it on its
+  performance asks first, then lays out the Marker settings' columns, 16 four bars apart by default, and a Start
+  marker): a click on a clip before the Start marker launches it on its
   track, looping, from the next sync point (Shift queues, Alt at once); a right click or the track header stops it.
-  Each track's Performance settings ▸ (Press, Motion, Trigger sync, Queue, Tolerant, Position sync) are saved as FL
-  saves them. Not yet: MIDI and the typing keyboard, scenes, recording a performance
+  Notes 0–119 on Settings ▸ MIDI's Performance mode MIDI channel launch the first 10 tracks' 12 columns (a key's
+  release ends Hold & stop; notes 120–124 scroll the grid, outlined in the zone; while 127 is held, launches sync
+  to the global snap). Ctrl+click on a zone clip launches a scene (a Scene stops the other tracks, a +Scene keeps them):
+  its clip group's clips, else its column on its track group's tracks, else its whole column, as do notes while 125
+  (Scene) or 126 (+Scene) is held (columns). A playing clip's zone clip is outlined and fills as it plays, and the
+  track header can show the pass's progress (the ▸ menu's Performance clip / track progress); the clock's bars are
+  negative in the zone. Each track's Performance settings ▸ (Press, Motion, Trigger sync, Queue, Tolerant,
+  Position sync) are saved as FL saves them. With Record armed, stopping the song writes what the launched tracks
+  played after the Start marker as clips on their tracks (one undo step). A slot's later clips are sub-clips: the
+  mouse plays them in turn, a MIDI note's velocity picks one (the ▸ menu's Velocity picks sub-clips), and Motion
+  plays each slot's first clip. Not yet: the typing keyboard
 
 ## ✅ Mixing and routing
 
@@ -96,6 +117,19 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   separators around the selected tracks), Auto color group and Select ▸ Group; Dock to ▸ Left / Middle / Right keeps a
   strip after the master or at the right edge while the others scroll; Allow threaded processing off keeps the track
   on the rendering thread. All saved in the project as the original saves them
+- Mixer track states: the track menu's File ▸ Save mixer track state keeps a track's levels, switches, equaliser and
+  effects with their settings in the user folder's Mixer states; File ▸ Open mixer track state ▸ puts one on a track
+  (it keeps its name and colour) and Insert from state ▸ inserts a new track from one. Lemon Studio's own files
+  (`.lemontrack`), not the original's
+- Mixer options ▸ View ▸ Waveforms (Alt+W, also the title bar's button) draws each track's recent peaks as a scrolling
+  waveform in place of its meter; Extra properties (the title bar's other button) shows or hides the polarity, swap
+  and separation controls. Both for the session
+- The mixer slot menu's Help opens the plugin's own help page (CLAP and VST3 plugins that name one; Lemon Studio's
+  own effects open the list of built-in effects), and Scaling ▸ sizes a hosted plugin's window: Main (the program's
+  scale) or 100 % to 200 %, for the session
+- Change icon... in the mixer track menu draws an icon under the track's name, and in the slot menu before the
+  slot's name and on its plugin window; the icons move with their tracks and slots, for the session. The slot menu's
+  Link all parameters... links the effect's parameters to consecutive controllers, as its window menu's
 
 ## ✅ Plugin hosting
 
@@ -107,8 +141,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   its default and minimum to maximum), remove an initial value read from a file
 - Not yet in the parameter menu: Init song with this position on a plugin parameter
 - VST2 shells (one file offering several plugins); a VST2 plugin's state is saved in the layout FL Studio's projects use
-- On Windows, a plugin that crashes is stopped (its slot passes the sound through) instead of closing
-  Lemon Studio
+- A plugin that crashes is stopped (its slot passes the sound through) instead of closing Lemon Studio. On macOS
+  and Linux this is new and not yet tried on those systems, and a crash in a plugin's editor still closes it there
 - Not yet: 32-bit plugins, and Intel-only plugins on Apple silicon (they need a bridge)
 
 ## 🚧 Plugin delay compensation
@@ -122,6 +156,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   are saved back
 - Automation of a mixer track or slot behind late audio waits for it, as in FL Studio
 - A sidechain input waits for the slot it feeds, so it lines up with the audio there
+- Mixer options ▸ Plugin delay compensation ▸ Automatic (on): unticked, plugins' delays are no longer made up, while
+  the tracks' latency settings still are. For the session (not yet saved in the project)
 - The latency settings are edited from the input clock, the track latency combo and the strip's latency clock (right
   click): Reset, or a value typed in ms, samples or beats; the clocks turn orange when set
 
@@ -150,7 +186,23 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   compare them (one undo step; the spare state is kept while the plugin is open, not in the project). Display preset
   name in preset selector hides or shows the preset's name in the window
 - The plugin window's menu acts on its own channel (Piano roll, Delete..., Rename, color and icon..., Change color...,
-  Random color) or effect slot (Replace ▸, Delete..., Rename, color and icon...)
+  Random color) or effect slot (Replace ▸, Delete..., Rename, color and icon..., Change color..., Random color); an
+  effect's window menu has no Piano roll or Channel column, as in the original
+- Allow threaded processing and Auto-bypass when silent (the original's Smart disable) in a plugin's window menu and a
+  mixer slot's menu: per plugin switches, one undo step each, saved in the project the way the original saves them.
+  With Auto-bypass when silent on (and Audio settings ▸ CPU ▸ Auto-bypass when silent, on by default), a mixer slot
+  stops running its effect once its input and output have been silent for a hold time (a second for the built-in
+  effects, the whole delay line for Delay 3, four seconds for hosted plugins; never for the Peak and Formula
+  Controllers) and runs it again as soon as sound reaches it; what is heard is the same. Switch auto-bypass for all
+  plugins (TOOLS, the mixer's and the rack's options menus) turns it on for every plugin when one is off, and off for
+  all when all are on. A plugin channel with the switch on stops running its instrument once it has had nothing to
+  play (no note held or arriving, no controller message, parameter value or audio clip) and been silent for four
+  seconds, and runs it again with the next one
+- The plugin window's menu: Link all parameters... links every parameter of the plugin to consecutive MIDI
+  controllers in one go (the MIDI learn box); Change icon... gives a channel or effect an icon, shown in its window's
+  title, the playlist picker and its clips (for the session); Save channel state as... saves a channel with its plugin
+  and settings into Channel presets, which Browse channel states opens in the browser, and dropping one adds the
+  channel. The picker's Change icon... too
 - Import of `.ospreset`, `.vstpreset` and VST2 `.fxp` / `.fxb` files (a bank goes into a folder of its own); a preset
   file dropped onto a plugin window, rack row or mixer slot loads there, and anywhere else adds its plugin
 
@@ -223,9 +275,16 @@ project) to Diagnostics.txt in the user folder and opens it. TOOLS > Save MIDI c
 roll's copied notes to a numbered MIDI file in the user folder's Clipboard files, which the browser then shows; Save
 audio clipboard to browser does the same with the audio on the clipboard (what Tesla copies; Windows and macOS).
 VIEW > Remote control opens the browser's Remote control section, one row per controller link.
-TOOLS > Set up for live performance prepares the arranger for performance mode.
-Not yet (greyed in the menu bar): TOOLS > Chord progression tool..., Control builder, Set up for MIDI export, Switch auto-bypass for all plugins, Lock / Unlock all tracks to / from their clips, Set
-keyboard focus of all plugins to ▸; VIEW > Script output.
+TOOLS > Set up for live performance prepares the arranger for performance mode. TOOLS > Switch auto-bypass for all
+plugins switches every plugin's Auto-bypass when silent.
+TOOLS > Chord progression tool... (Lemon Studio's design) asks for a progression, one chord a bar, as chord names
+(C G Am F7 Dm/F) or numerals (I V vi IV, with "Am:" first for the key) and writes it into the piano roll's pattern
+after its last note, as one undo step. TOOLS > Set keyboard focus of all plugins to ▸ Disabled keeps plugin editors
+from taking typed keys, which then play and steer Lemon Studio instead (Windows and macOS; for the session). TOOLS >
+Lock all tracks to their clips locks each playlist track whose clips share one source to it, so Draw and Paint place
+that source there whatever the current one is (a lock shows in the track header); Unlock all tracks from their
+clips clears the locks. Both are one undo step, and kept for the session only.
+Not yet (greyed in the menu bar): TOOLS > Control builder, Set up for MIDI export; VIEW > Script output.
 
 **Window positions.** Where the windows were when Lemon Studio closed comes back at the next start: the main
 window (its place and size, and whether it was maximized; brought back onto a screen if its screen is gone) and the
@@ -247,16 +306,20 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   projects keep every LFO field
 - The event editor (Edit events on a control's menu: channel volume, pan and pitch, mixer controls, the tempo, plugin
   parameters) shows the control's events in the selected pattern as its level over time, in the setting's own unit: left
-  drag draws freehand on the global snap, right drag a straight line, Erase and Select tools, the wheel scrolls and
-  Ctrl+wheel zooms; its Edit menu has Cut, Copy, Paste, Select all, Delete, Insert current controller value and Turn
-  into automation clip, which moves the events into a new clip channel linked to the control, as the original does
+  drag draws freehand on the global snap, right drag a straight line, Paint (drawing off the snap), Erase,
+  Interpolate (a drag lays the events under it on a straight line, right drag a smooth one), Select and Zoom (Z:
+  a click zooms in about it, a drag on the stretch dragged over, a right click out) tools, the wheel scrolls and Ctrl+wheel zooms; its Edit menu has Cut, Copy, Paste, Select all, Select previous / next
+  (Ctrl+Left / Right: the selection moves by its length), Delete, Duplicate (Ctrl+B), Insert space (Ctrl+Ins), Delete
+  space (Ctrl+Del), Insert current controller value and Turn into automation clip, then Zoom in / out (PgUp / PgDn),
+  Zoom on selection (Shift+5) and Relocate events (Paste makes room, Cut and Delete close the gap), and its Tools
+  open the piano roll's Scale levels and LFO (Ctrl+L) dialogs on the control's events in the selection. Turn
+  into automation clip moves the events into a new clip channel linked to the control, as the original does
   (the control's earlier value until the first event, then the events, a recorded ramp as one straight segment, ending
   on the last event). Each edit is an undo step
 - A knob's menu (channel volume and pan, mixer and main knobs): Edit automation clip... shows the clip that drives it,
   as on a plugin parameter, and Set... puts it at its default, the minimum, 25, 50 or 75% or the maximum, each listed
   with the knob's value there (one undo step)
-- Not yet in the event editor: the Paint, Interpolate and Zoom tools, Scale levels and LFO, inserting and deleting time,
-  a second window
+- Not yet in the event editor: Auto smoothing, Center, a second window
 
 ## 🚧 Project files
 
@@ -408,7 +471,27 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Tesla's noise gating: Acquire noise threshold (Alt+N, from a noise-only selection, else -40 dBFS), Gate noise (the
   gate button's right click), Trim side noise (its left click) and Trim all noise & slice up (each sound left a
   region); the bottom bar's threshold button shows the threshold over the waveform
-- Not yet: the declicker, the envelope tools with a dialog, detect pitch regions, convert to score
+- Tesla's Clean up (Ctrl+U) has a declicker (with a sensitivity) that redraws clicks and pops, and the declipper has
+  three modes (General, Digital for flat tops only, Soft) and a Safe mode; either one alone is enough to preview
+- Tesla's envelope tools with a dialog, in an envelope mode: Scale levels..., Decimate points..., Filter..., Smooth
+  up... and Create sequence... (steps over the selection), each with a preview
+- Tesla's Regions > Detect pitch regions makes a region per held note, named after it
+- Tesla's Regions > Set first downbeat starts bar 1 at the selection or cursor: the Bar : Beat : Tick ruler, grid
+  slicing and Convert to score count from it
+- Tesla's Tools > Convert to score and dump to piano roll puts the held notes of the selection into the selected
+  channel's piano roll (current pattern), at the project's tempo
+- Tesla's envelope points can be smooth (Alt+click one, or Tools > Turn all points smooth); the amp envelopes are
+  heard while Tesla plays, before a mixdown; Scratch (envelope) plays the selection at the position the all-purpose
+  envelope draws (bottom the start, top the end), and Edit > Paste mix (envelope) (Shift+Ctrl+V) mixes the clipboard
+  in by it
+- Tesla's volume envelope runs from silence to 200% (+6 dB) and its stereo separation envelope from double width at
+  the bottom to mono at the top, as the original's manual gives them
+- Tesla's Tools > Vocal denoise / isolator... keeps the voice (centred, harmonic, in the voice band, over the steady
+  noise) and takes out the rest, or the other way round, by one MIX knob; Deverb... takes the late reverb out of the
+  selection (General or Vocal) at a reverb time it measures there; both preview, with undo
+- Tesla's Edit > Undo mix (envelope) ▸ mixes an earlier state of the sample back in by the all-purpose envelope (the
+  top undoes, the bottom keeps the change)
+- Not yet: Edit > Undo mix (spectral)
 
 ## ✅ Exporting audio
 
@@ -525,7 +608,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   period); a device that refuses exclusive mode plays in shared mode, and the page says why
 - ASIO® on Windows, output only: the installed drivers are in Settings > Audio's Output device list; the master plays
   to the driver's first two outputs, and Show ASIO panel opens the driver's own settings
-- ALSA (and PipeWire / PulseAudio through it) on Linux
+- On Linux: the sound server (PulseAudio, or PipeWire through pipewire-pulse), ALSA directly, or JACK (Settings > Audio
+  ▸ Mode ▸ JACK: a JACK client at the server's rate and buffer length, its ports connected to the system's; with no
+  JACK server running it plays as in shared mode)
 - Core Audio on macOS
 - Output device, sample rate and buffer length in Settings > Audio
 - Auto close (Settings > Audio): the output closes while another program is in front, and a playing song pauses
@@ -560,7 +645,7 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 ## 🚧 Settings
 
 - Every page works: MIDI, Audio, Recording, General, File, Plugins, Theme, Project and Info. The controls that are not greyed out act, but for
-  a few that are only kept for now (Smart disable, Resampling quality and others Lemon Studio has nothing to change
+  a few that are only kept for now (Resampling quality and others Lemon Studio has nothing to change
   with yet); the program's choices are kept in `settings.txt` in the user folder
 - General ▸ Input ▸ Manage shortcuts: the F8 keys (browser, plugin picker, plugin database) and the audio clip
   double-click can be swapped

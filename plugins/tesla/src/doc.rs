@@ -36,6 +36,8 @@ pub enum Paste {
     Insert,
     Replace,
     Mix,
+    /// Edit > Paste mix (envelope): the all-purpose envelope sets the mix.
+    MixEnv,
 }
 
 #[derive(Clone, Debug)]
@@ -192,6 +194,40 @@ impl Doc {
     /// Forgets the redo steps (a cancelled preview leaves one that would only confuse).
     pub fn discard_redo(&mut self) {
         self.redo.clear();
+    }
+
+    /// The sample as it was before the newest `n` steps, when Undo mix (envelope) can mix it in: as long as the sample
+    /// is now, with as many channels, at the same rate.
+    fn undo_state(&self, n: usize) -> Option<Arc<Sample>> {
+        let i = self.undo.len().checked_sub(n).filter(|_| n > 0)?;
+        let s = &self.undo[i].sample;
+        let same = s.channels() == self.sample.channels() && s.rate == self.sample.rate;
+        let fits = self.frames() > 0 && s.frames() == self.frames() && same;
+        fits.then(|| s.clone())
+    }
+
+    /// Whether Undo mix (envelope) can go back over the newest `n` steps (`undo_state`).
+    pub fn can_undo_mix(&self, n: usize) -> bool {
+        self.undo_state(n).is_some()
+    }
+
+    /// Edit > Undo mix (envelope): over the range (the selection, else the whole sample), the sample as it was before
+    /// the newest `n` steps is mixed back in by the **all-purpose envelope**, sample × (1 − v) + earlier × v (the top
+    /// undoes, the bottom keeps the change, mid height is equal parts). The markers stay as they are. One undo step
+    /// "Undo mix (envelope)"; false when that state has another length, channel count or rate. The original's manual
+    /// says only that the envelope guides the undo: the rule is Lemon Studio's design, the one Paste mix (envelope)
+    /// follows.
+    pub fn undo_mix(&mut self, n: usize) -> bool {
+        let Some(old) = self.undo_state(n) else { return false };
+        let p = self.env.points(env::ALL, self.frames());
+        self.tool("Undo mix (envelope)", |s, a, b| {
+            for (c, o) in s.ch.iter_mut().zip(&old.ch) {
+                for f in a..=b {
+                    let g = env::value(&p, f as f64);
+                    c[f] = c[f] * (1.0 - g) + o[f] * g;
+                }
+            }
+        })
     }
 
     /// Undoes the newest `n` steps (picking a step in the undo history goes back to before it).
@@ -491,6 +527,26 @@ impl Doc {
                 s.quantize();
                 self.sel = Some((at, at + m - 1));
             }
+            Paste::MixEnv => {
+                // Lemon Studio's design (the original's paste was not measured): at each frame the all-purpose
+                // envelope's height v mixes the clipboard in, sample × (1 − v) + clipboard × v (the bottom keeps the
+                // sample, mid height is equal parts, the top is the clipboard alone); past the end the sample is silence.
+                let at = self.insert_at();
+                let p = self.env.points(env::ALL, self.frames());
+                let s = self.edit("Paste mix (envelope)");
+                let n = s.frames();
+                for (c, src) in s.ch.iter_mut().zip(&clip.ch) {
+                    if at + m > n {
+                        c.resize(at + m, 0.0);
+                    }
+                    for (j, v) in src.iter().enumerate() {
+                        let g = env::value(&p, (at + j) as f64);
+                        c[at + j] = c[at + j] * (1.0 - g) + v * g;
+                    }
+                }
+                s.quantize();
+                self.sel = Some((at, at + m - 1));
+            }
         }
         true
     }
@@ -757,7 +813,12 @@ impl Doc {
             return 0;
         }
         let step = 60.0 / self.grid_tempo() * self.sample.rate as f64 / [4.0, 2.0, 1.0][k.min(2)];
-        let st: Vec<usize> = (0..).map(|i| (i as f64 * step).round() as usize).take_while(|&f| f < n).collect();
+        // The grid runs through the first downbeat; a part before its first line is a slice of its own.
+        let first = self.sample.downbeat as f64 % step;
+        let mut st: Vec<usize> = (0..).map(|i| (first + i as f64 * step).round() as usize).take_while(|&f| f < n).collect();
+        if st.first().is_some_and(|&f| f > 0) {
+            st.insert(0, 0);
+        }
         self.slice_regions(GRID_SLICING[k.min(2)], &st, "Slice", None)
     }
 
@@ -771,6 +832,79 @@ impl Doc {
         let bpm = (b.bpm * 1000.0).round() / 1000.0;
         let k = self.slice_regions("Detect beats", &b.frames(n), "Beat", Some(bpm as f32));
         (k > 0).then_some((bpm, k))
+    }
+
+    /// Regions > Set first downbeat (Lemon Studio's design): bar 1 starts at the selection's start, else the cursor.
+    /// False when it already does.
+    pub fn set_downbeat(&mut self) -> bool {
+        let n = self.frames();
+        if n == 0 {
+            return false;
+        }
+        let at = self.insert_at().min(n - 1);
+        if at == self.sample.downbeat {
+            return false;
+        }
+        self.edit("Set first downbeat").downbeat = at;
+        true
+    }
+
+    /// Tools > Convert to score and dump to piano roll (Lemon Studio's design): the held notes of the selection (else
+    /// the whole sample) as `os_dsp::pitch` finds them, timed in seconds from the first downbeat (notes that start
+    /// before it are left out), each at a velocity of 127 × the square root of its peak.
+    pub fn score(&self) -> Vec<os_hostlink::NoteOut> {
+        let Some((a, b)) = self.range() else { return Vec::new() };
+        let s = &self.sample;
+        let (l, r) = Self::pair(s);
+        let (l, r) = (&l[a..=b], &r[a..=b]);
+        let rate = f64::from(s.rate.max(1));
+        let db = s.downbeat;
+        os_dsp::pitch::regions(l, r, s.rate)
+            .into_iter()
+            .filter_map(|(pos, len, note)| {
+                let start = a + pos;
+                let key = u8::try_from(note).ok().filter(|&k| k < 128)?;
+                if start < db {
+                    return None;
+                }
+                let peak = l[pos..pos + len].iter().chain(&r[pos..pos + len]).fold(0f32, |m, v| m.max(v.abs()));
+                let velocity = (127.0 * peak.min(1.0).sqrt()).round().clamp(1.0, 127.0) as u8;
+                let t = |f: usize| (f - db) as f64 / rate;
+                Some(os_hostlink::NoteOut { start: t(start), end: t(start + len), key, velocity })
+            })
+            .collect()
+    }
+
+    /// Tools > Scratch (envelope): the selection (else the whole sample) played at the all-purpose envelope's position
+    /// (`env::scratch`). False while that envelope is flat.
+    pub fn scratch(&mut self) -> bool {
+        let n = self.frames();
+        if n == 0 || self.env.is_flat(env::ALL) {
+            return false;
+        }
+        let p = self.env.points(env::ALL, n);
+        self.tool("Scratch (envelope)", |s, a, b| env::scratch(s, a, b, &p))
+    }
+
+    /// Regions > Detect pitch regions (Lemon Studio's design, `os_dsp::pitch`): the sample's regions give way to one
+    /// per held note, named after it ("A5"; C5 = note 60). The number of regions (0: no note found, nothing done).
+    pub fn detect_pitch_regions(&mut self) -> usize {
+        if self.frames() == 0 {
+            return 0;
+        }
+        let s = self.sample.clone();
+        let (l, r) = Self::pair(&s);
+        let found = os_dsp::pitch::regions(l, r, s.rate);
+        if found.is_empty() {
+            return 0;
+        }
+        let e = self.edit("Detect pitch regions");
+        e.cues.retain(|c| !c.is_region());
+        for &(pos, len, note) in &found {
+            e.add_cue(&os_dsp::pitch::note_name(note), pos, Some(len));
+        }
+        self.view.regions = true;
+        found.len()
     }
 
     /// Regions > Zero-cross check all regions: each region's start and end move to the nearest zero crossing within
@@ -1257,5 +1391,61 @@ mod tests {
         assert_eq!(r.channels(), 2);
         assert_eq!(r.frames(), 6);
         assert_eq!(r.ch[1][1], 0.5);
+    }
+
+    /// Paste mix (envelope), Set first downbeat (it moves with edits, grid-slicing and the score count from it), and
+    /// the score of a held note.
+    #[test]
+    fn paste_mix_envelope_downbeat_and_score() {
+        let mut d = Doc::default();
+        d.load(Sample::from_channels(1000, vec![vec![0.2; 100]], Format::Float32), "");
+        // The all-purpose envelope from the bottom (the sample) to the top (the clipboard).
+        d.env.move_point(env::ALL, 100, 0, 0.0, 0.0);
+        d.env.move_point(env::ALL, 100, 2, 99.0, 1.0);
+        let clip = Sample::from_channels(1000, vec![vec![0.6; 100]], Format::Float32);
+        d.cursor = 0;
+        assert!(d.paste(&clip, Paste::MixEnv));
+        assert_eq!(d.history()[0], "Paste mix (envelope)");
+        let c = &d.sample.ch[0];
+        assert!((c[0] - 0.2).abs() < 1e-6 && (c[99] - 0.6).abs() < 1e-6 && (c[50] - 0.4).abs() < 1e-6, "{} {} {}", c[0], c[50], c[99]);
+        // Set first downbeat at the cursor; an insert before it moves it.
+        d.sel = None;
+        d.cursor = 40;
+        assert!(d.set_downbeat());
+        assert!(!d.set_downbeat(), "already there");
+        assert_eq!(d.sample.downbeat, 40);
+        d.cursor = 10;
+        d.insert_silence(5);
+        assert_eq!(d.sample.downbeat, 45);
+        assert!(d.undo().is_some() && d.undo().is_some());
+        assert_eq!(d.sample.downbeat, 0);
+        // Grid-slicing runs through the downbeat: at 120 BPM and 1 kHz a quarter beat is 125 frames.
+        let mut g = Doc::default();
+        let mut s = Sample::from_channels(1000, vec![vec![0.1; 1000]], Format::Float32);
+        s.tempo = 120.0;
+        s.downbeat = 300;
+        g.load(s, "");
+        assert_eq!(g.grid_slice(0), 9);
+        let st: Vec<usize> = g.regions().iter().map(|r| r.0).collect();
+        assert_eq!(st, vec![0, 50, 175, 300, 425, 550, 675, 800, 925]);
+        // The score: one A5 (69) held from 0.5 s to 1.5 s, timed from a downbeat at 0.25 s.
+        let rate = 44100;
+        let mut x = vec![0.0f32; 2 * rate];
+        for (i, v) in x.iter_mut().enumerate().take(3 * rate / 2).skip(rate / 2) {
+            *v = (0.5 * (std::f64::consts::TAU * 440.0 * i as f64 / rate as f64).sin()) as f32;
+        }
+        let mut sc = Doc::default();
+        sc.load(Sample::from_channels(rate as u32, vec![x], Format::Float32), "");
+        sc.cursor = rate / 4;
+        sc.set_downbeat();
+        let notes = sc.score();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        let n = notes[0];
+        assert_eq!((n.key, n.velocity), (69, 90));
+        assert!((n.start - 0.25).abs() < 0.05 && (n.end - 1.25).abs() < 0.07, "{n:?}");
+        // Notes before the downbeat are left out.
+        sc.cursor = rate;
+        sc.set_downbeat();
+        assert!(sc.score().is_empty());
     }
 }

@@ -132,6 +132,8 @@ pub(super) struct MixCx<'a> {
     /// Whether the master's slots and the insert tracks' run (an export's switches).
     pub master_fx: bool,
     pub insert_fx: bool,
+    /// The program's Auto-bypass when silent setting (`super::auto_bypass`).
+    pub auto_bypass: bool,
     /// On a device: its inputs this tick (interleaved), how many, and its output pairs.
     pub io: Option<(&'a [f32], usize, usize)>,
     pub keys: Keys,
@@ -537,6 +539,8 @@ pub(super) struct InstOut {
     /// The delay it reported, and whether it said it still sounds.
     pub delay: u32,
     pub active: bool,
+    /// How long the instrument has had nothing to play and put out silence (`instrument_job`, auto-bypass).
+    pub quiet: super::auto_bypass::Quiet,
 }
 
 /// The audio clips with shapes on instrument channels (`Engine::inst_shapes`), shared by the channels of a tick: each

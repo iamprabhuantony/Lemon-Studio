@@ -153,11 +153,11 @@ pub fn curve_at(p: &[Point], x: f64, smooth: bool) -> f32 {
 
 /// The default curves: Equalize's flat line with three points, Blur's bell with five.
 pub fn flat_curve() -> Vec<Point> {
-    [0.0, 0.5, 1.0].iter().map(|&pos| Point { pos, v: 0.5 }).collect()
+    [0.0, 0.5, 1.0].iter().map(|&pos| Point { pos, v: 0.5, smooth: false }).collect()
 }
 
 pub fn bell_curve() -> Vec<Point> {
-    [(0.0, 0.0), (0.25, 0.5), (0.5, 1.0), (0.75, 0.5), (1.0, 0.0)].iter().map(|&(pos, v)| Point { pos, v }).collect()
+    [(0.0, 0.0), (0.25, 0.5), (0.5, 1.0), (0.75, 0.5), (1.0, 0.0)].iter().map(|&(pos, v)| Point { pos, v, smooth: false }).collect()
 }
 
 /// The equalizer's frequency axis: x (0 to 1) to Hz, 20 Hz to 20 kHz on a log scale, and back.
@@ -388,7 +388,7 @@ impl Curve {
     pub const MAX: usize = 16;
 
     pub fn from_points(p: &[Point]) -> Curve {
-        let mut c = Curve { n: 0, p: [Point { pos: 0.0, v: 0.5 }; Curve::MAX] };
+        let mut c = Curve { n: 0, p: [Point { pos: 0.0, v: 0.5, smooth: false }; Curve::MAX] };
         for q in p.iter().take(Curve::MAX) {
             c.p[c.n] = *q;
             c.n += 1;
@@ -416,7 +416,7 @@ impl Curve {
         let x = x.clamp(0.0, 1.0);
         let i = self.points().iter().position(|q| q.pos > x).unwrap_or(self.n - 1).max(1);
         self.p.copy_within(i..self.n, i + 1);
-        self.p[i] = Point { pos: x, v: v.clamp(0.0, 1.0) };
+        self.p[i] = Point { pos: x, v: v.clamp(0.0, 1.0), smooth: false };
         self.n += 1;
         Some(i)
     }
@@ -433,7 +433,7 @@ impl Curve {
         } else {
             x.clamp(self.p[i - 1].pos, self.p[i + 1].pos)
         };
-        self.p[i] = Point { pos, v: v.clamp(0.0, 1.0) };
+        self.p[i] = Point { pos, v: v.clamp(0.0, 1.0), smooth: false };
     }
 
     /// Removes point `i` (not an end); whether it went.
@@ -455,12 +455,68 @@ pub struct Clean {
     /// The declipper's threshold, 0 to 1: samples at or over (0.5 + level / 2) of the range's peak count as clipped
     /// (0.95 by default).
     pub level: f32,
+    /// The declipper's mode, and Safe mode (Lemon Studio's design).
+    pub mode: ClipMode,
+    pub safe: bool,
+    /// The declicker and its sensitivity, 0 to 1 (½ by default).
+    pub declick: bool,
+    pub sensitivity: f32,
 }
 
 impl Default for Clean {
     fn default() -> Self {
-        Clean { denoise: Denoise::default(), declip: false, level: 0.9 }
+        Clean { denoise: Denoise::default(), declip: false, level: 0.9, mode: ClipMode::General, safe: false, declick: false, sensitivity: 0.5 }
     }
+}
+
+/// The declipper's modes (Lemon Studio's set; the original's list past its default "General" was not opened):
+/// which runs count as clipped and how far around them the redraw reaches.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClipMode {
+    /// Two or more samples of one sign at or over the clip level.
+    #[default]
+    General,
+    /// Digital clipping only: two or more samples at or over the clip level and equal (within 0.01 %), flat tops.
+    Digital,
+    /// Soft (analog) clipping: one sample or more at or over the level, redrawn from one sample further out on each
+    /// side, for rounder tops.
+    Soft,
+}
+
+impl ClipMode {
+    pub const ALL: [ClipMode; 3] = [ClipMode::General, ClipMode::Digital, ClipMode::Soft];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ClipMode::General => "General",
+            ClipMode::Digital => "Digital",
+            ClipMode::Soft => "Soft",
+        }
+    }
+
+    pub fn next(self) -> ClipMode {
+        ClipMode::ALL[(ClipMode::ALL.iter().position(|&m| m == self).unwrap_or(0) + 1) % ClipMode::ALL.len()]
+    }
+}
+
+/// Safe mode: a run longer than this is left alone (a held note, not a clip), ...
+const SAFE_RUN_MS: f64 = 5.0;
+/// ... and a redrawn top is kept within this factor of the clip level (+3 dB) and full scale.
+const SAFE_OVER: f32 = std::f32::consts::SQRT_2;
+
+/// Redraws `x[i..j]` as a cubic from `x[i - 1]` to `x[j]`, its slopes those of the sample pairs just outside (`x[i -
+/// 2]` and `x[j + 1]` must exist).
+fn redraw(x: &[f32], i: usize, j: usize) -> Vec<(usize, f32)> {
+    let (p0, p1) = (x[i - 1] as f64, x[j] as f64);
+    let len = (j - (i - 1)) as f64;
+    let (m0, m1) = ((x[i - 1] - x[i - 2]) as f64 * len, (x[j + 1] - x[j]) as f64 * len);
+    (i..j).map(move |k| {
+        let t = (k + 1 - i) as f64 / len;
+        let (t2, t3) = (t * t, t * t * t);
+        let h = (2.0 * t3 - 3.0 * t2 + 1.0) * p0 + (t3 - 2.0 * t2 + t) * m0 + (-2.0 * t3 + 3.0 * t2) * p1 + (t3 - t2) * m1;
+        (k, h as f32)
+    })
+    .collect()
 }
 
 impl Clean {
@@ -473,36 +529,99 @@ impl Clean {
 /// redrawn as a cubic through the samples on both sides, its slopes those of the two samples before and after, so the
 /// flattened tops come back rounded (and may go over the old peak: normalize after).
 pub fn declip(x: &mut [f32], limit: f32) -> usize {
+    declip_with(x, limit, ClipMode::General, None)
+}
+
+/// The declipper in mode `mode`; `safe`: Safe mode at this rate (runs over 5 ms left alone, tops kept to +3 dB over
+/// the clip level and full scale). The number of runs redrawn.
+pub fn declip_with(x: &mut [f32], limit: f32, mode: ClipMode, safe: Option<u32>) -> usize {
     let n = x.len();
     let mut runs = 0;
     let mut i = 0;
+    let longest = safe.map(|r| ((f64::from(r) * SAFE_RUN_MS / 1000.0).round() as usize).max(2));
     while i < n {
         if x[i].abs() < limit || limit <= 0.0 {
             i += 1;
             continue;
         }
         let sign = x[i].signum();
+        let first = x[i];
         let mut j = i;
-        while j < n && x[j].abs() >= limit && x[j].signum() == sign {
+        let same = |v: f32| mode != ClipMode::Digital || (v - first).abs() <= first.abs() * 1e-4;
+        while j < n && x[j].abs() >= limit && x[j].signum() == sign && same(x[j]) {
             j += 1;
         }
-        // Samples i..j are clipped: redraw them from i - 1 to j when both sides are there.
-        if j - i >= 2 && i >= 2 && j + 1 < n {
-            let (p0, p1) = (x[i - 1] as f64, x[j] as f64);
-            let len = (j - (i - 1)) as f64;
-            let (m0, m1) = ((x[i - 1] - x[i - 2]) as f64 * len, (x[j + 1] - x[j]) as f64 * len);
-            for (k, v) in x[i..j].iter_mut().enumerate() {
-                let t = (k + 1) as f64 / len;
-                let (t2, t3) = (t * t, t * t * t);
-                let h = (2.0 * t3 - 3.0 * t2 + 1.0) * p0 + (t3 - 2.0 * t2 + t) * m0 + (-2.0 * t3 + 3.0 * t2) * p1 + (t3 - t2) * m1;
-                // A redrawn top never comes back lower than the clip.
-                *v = if (h as f32).abs() < limit { limit * sign } else { h as f32 };
+        let (min, reach) = if mode == ClipMode::Soft { (1, 1) } else { (2, 0) };
+        let ok = j - i >= min && longest.is_none_or(|m| j - i <= m);
+        // Samples i..j are clipped: redraw them (and `reach` more on each side) when both sides are there.
+        let (a, b) = (i.saturating_sub(reach), j + reach);
+        if ok && i >= reach && a >= 2 && b + 1 < n {
+            let new = redraw(x, a, b);
+            for (k, h) in new {
+                let mut h = if h.abs() < limit && (i..j).contains(&k) { limit * sign } else { h };
+                if safe.is_some() {
+                    let cap = (limit * SAFE_OVER).min(1.0).max(limit);
+                    h = h.clamp(-cap, cap);
+                }
+                x[k] = h;
             }
             runs += 1;
         }
-        i = j;
+        i = j.max(i + 1);
     }
     runs
+}
+
+/// The declicker's frame for its local level (s), and the longest click it repairs (s).
+const CLICK_WINDOW_S: f64 = 0.01;
+const CLICK_MAX_S: f64 = 0.002;
+
+/// The declicker (Lemon Studio's design): a sample is part of a click where the signal's second difference is
+/// `k` times its mean size over the 10 ms around it, k from 40 (sensitivity 0) to 5 (1), 14 at ½; each click, widened
+/// by two samples on both sides and at most 2 ms long, is redrawn as the declipper redraws a run. The number of clicks.
+pub fn declick(x: &mut [f32], rate: u32, sensitivity: f32) -> usize {
+    let n = x.len();
+    if n < 8 {
+        return 0;
+    }
+    let k = 40.0 * (5.0f64 / 40.0).powf(f64::from(sensitivity.clamp(0.0, 1.0)));
+    let d: Vec<f64> = (0..n).map(|i| if i == 0 || i + 1 == n { 0.0 } else { (f64::from(x[i - 1]) - 2.0 * f64::from(x[i]) + f64::from(x[i + 1])).abs() }).collect();
+    let half = ((f64::from(rate) * CLICK_WINDOW_S / 2.0).round() as usize).max(4);
+    let longest = ((f64::from(rate) * CLICK_MAX_S).round() as usize).max(4);
+    // A running sum for the local mean.
+    let mut sum = vec![0.0f64; n + 1];
+    for i in 0..n {
+        sum[i + 1] = sum[i] + d[i];
+    }
+    let click: Vec<bool> = (0..n)
+        .map(|i| {
+            let (a, b) = (i.saturating_sub(half), (i + half + 1).min(n));
+            let mean = (sum[b] - sum[a]) / (b - a) as f64;
+            d[i] > k * mean.max(1e-6)
+        })
+        .collect();
+    let mut found = 0;
+    let mut i = 0;
+    while i < n {
+        if !click[i] {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < n && (click[j] || (j + 1 < n && click[j + 1]) || (j + 2 < n && click[j + 2])) {
+            j += 1;
+        }
+        let (a, b) = (i.saturating_sub(2), (j + 2).min(n));
+        if b - a <= longest && a >= 2 && b + 1 < n {
+            let new = redraw(x, a, b);
+            for (k, h) in new {
+                x[k] = h;
+            }
+            found += 1;
+        }
+        i = j.max(i + 1);
+    }
+    found
 }
 
 /// Runs `f` on frames `a..=b` of each channel with a frame of context on both sides (where the sample has it), and
@@ -529,7 +648,8 @@ pub fn blur_range(s: &mut crate::sample::Sample, a: usize, b: usize, curve: &Cur
     in_context(s, a, b, |_, x| blur(x, rate, curve.points(), bl));
 }
 
-/// Clean up (denoise)... over frames `a..=b`: the denoiser when `prof` is given, then the declipper when it is on.
+/// Clean up (denoise)... over frames `a..=b`: the denoiser when `prof` is given, then the declipper and the declicker
+/// when they are on.
 pub fn clean_range(s: &mut crate::sample::Sample, a: usize, b: usize, prof: Option<&Profile>, c: &Clean) {
     let rate = s.rate;
     if let Some(p) = prof.filter(|p| p.rate == rate && p.n == frame_size(rate) && !p.mag.is_empty()) {
@@ -538,7 +658,12 @@ pub fn clean_range(s: &mut crate::sample::Sample, a: usize, b: usize, prof: Opti
     if c.declip {
         let limit = s.peak(a, b) * c.clip_ratio();
         for ch in &mut s.ch {
-            declip(&mut ch[a..=b], limit);
+            declip_with(&mut ch[a..=b], limit, c.mode, c.safe.then_some(rate));
+        }
+    }
+    if c.declick {
+        for ch in &mut s.ch {
+            declick(&mut ch[a..=b], rate, c.sensitivity);
         }
     }
 }
@@ -621,7 +746,7 @@ mod tests {
         let y = equalize(&lo, rate, &flat_curve(), &Equalize::default());
         assert!(lo.iter().zip(&y).all(|(a, b)| (a - b).abs() < 1e-4));
         // A curve from +24 dB at the bottom to −24 dB at the top: the low tone up, the high tone down.
-        let tilt = vec![Point { pos: 0.0, v: 1.0 }, Point { pos: 1.0, v: 0.0 }];
+        let tilt = vec![Point { pos: 0.0, v: 1.0, smooth: false }, Point { pos: 1.0, v: 0.0, smooth: false }];
         let eq = Equalize { mix: 1.0, smooth: false };
         let g = |x: &[f32]| 20.0 * (rms(&equalize(x, rate, &tilt, &eq)[4000..40000]) / rms(&x[4000..40000])).log10();
         let (glo, ghi) = (g(&lo), g(&hi));
@@ -683,11 +808,11 @@ mod tests {
         let mut c = Curve::flat();
         assert_eq!(c.points().len(), 3);
         assert_eq!(c.insert(0.25, 0.9), Some(1));
-        assert_eq!(c.points()[1], Point { pos: 0.25, v: 0.9 });
+        assert_eq!(c.points()[1], Point { pos: 0.25, v: 0.9, smooth: false });
         c.move_point(1, 0.8, 0.1);
         assert_eq!(c.points()[1].pos, 0.5, "kept left of its right neighbour");
         c.move_point(0, 0.3, 1.0);
-        assert_eq!(c.points()[0], Point { pos: 0.0, v: 1.0 }, "an end moves only up and down");
+        assert_eq!(c.points()[0], Point { pos: 0.0, v: 1.0, smooth: false }, "an end moves only up and down");
         assert!(!c.remove(0) && !c.remove(3));
         assert!(c.remove(1));
         assert_eq!(c.points().len(), 3);
@@ -709,6 +834,59 @@ mod tests {
         // Nothing clipped: nothing changes.
         let mut y = clean.clone();
         assert_eq!(declip(&mut y, 0.6), 0);
+        assert_eq!(y, clean);
+    }
+
+    #[test]
+    fn declipper_modes_and_safe_mode() {
+        let rate = 44100;
+        let clean = sine(4410, 441.0, rate);
+        let clipped: Vec<f32> = clean.iter().map(|v| v.clamp(-0.35, 0.35)).collect();
+        // Digital: the flat tops are found as in General.
+        let (mut g, mut d) = (clipped.clone(), clipped.clone());
+        let runs = declip_with(&mut g, 0.35 * 0.999, ClipMode::General, None);
+        assert_eq!(declip_with(&mut d, 0.35 * 0.999, ClipMode::Digital, None), runs);
+        assert_eq!(g, d);
+        // A sine's own (round) tops over the level: General redraws them, Digital leaves them.
+        let mut y = clean.clone();
+        assert_eq!(declip_with(&mut y, 0.45, ClipMode::Digital, None), 0);
+        assert_eq!(y, clean);
+        assert!(declip_with(&mut y, 0.45, ClipMode::General, None) > 0);
+        // Soft: single samples count too, and the redraw reaches one sample further.
+        let mut s = clipped.clone();
+        assert!(declip_with(&mut s, 0.35 * 0.999, ClipMode::Soft, None) >= runs);
+        assert_ne!(s, g);
+        // Safe: the tops stay within +3 dB of the clip level; a run over 5 ms is left alone.
+        let mut f = clipped.clone();
+        declip_with(&mut f, 0.35 * 0.999, ClipMode::General, Some(rate));
+        assert!(f.iter().all(|v| v.abs() <= 0.35 * 0.999 * std::f32::consts::SQRT_2 + 1e-6));
+        let mut held = vec![0.0f32; 1000];
+        held.extend(vec![0.5f32; 441]);
+        held.extend(vec![0.0f32; 1000]);
+        let before = held.clone();
+        assert_eq!(declip_with(&mut held, 0.45, ClipMode::General, Some(rate)), 0);
+        assert_eq!(held, before);
+    }
+
+    #[test]
+    fn declicker_redraws_clicks_and_leaves_the_rest() {
+        let rate = 44100;
+        let clean = sine(44100, 441.0, rate);
+        let mut x = clean.clone();
+        for at in [5000, 17000, 30001] {
+            x[at] += 0.7;
+            x[at + 1] -= 0.4;
+        }
+        let n = declick(&mut x, rate, 0.5);
+        assert_eq!(n, 3);
+        for at in [5000, 17000, 30001] {
+            assert!((x[at] - clean[at]).abs() < 0.02 && (x[at + 1] - clean[at + 1]).abs() < 0.02, "{} vs {}", x[at], clean[at]);
+        }
+        assert_eq!(x[..4990], clean[..4990]);
+        assert_eq!(x[30010..], clean[30010..]);
+        // A clean sine has no clicks, at any sensitivity.
+        let mut y = clean.clone();
+        assert_eq!(declick(&mut y, rate, 1.0), 0);
         assert_eq!(y, clean);
     }
 
